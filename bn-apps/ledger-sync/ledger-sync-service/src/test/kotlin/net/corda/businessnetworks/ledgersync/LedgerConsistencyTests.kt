@@ -159,6 +159,39 @@ class LedgerConsistencyTests {
         assertEquals(6, node1.fromNetwork().bogusStateCount())
     }
 
+    @Test
+    fun `transactions fail to be recovered`() {
+
+        val future = node1.fromNetwork().services.startFlow(BogusFlow(node2.fromNetwork().identity())).resultFuture
+        mockNetwork.runNetwork()
+        future.getOrThrow()
+
+        val bogusState = node1.fromNetwork().bogusStates().states.single()
+
+        node2.fromNetwork().simulateCatastrophicFailure()
+        assertEquals(0, node2.fromNetwork().bogusStateCount())
+
+        // Nodes transact with each other after failure
+        val future2 = node1.fromNetwork().services.startFlow(ConsumeBogusFlow(node2.fromNetwork().identity(), bogusState)).resultFuture
+        mockNetwork.runNetwork()
+        future2.getOrThrow()
+
+        // Txs are missing
+        val ledgerSyncResult = node2.fromNetwork().runRequestLedgerSyncFlow(node2.fromNetwork().regularNodes())
+        assertEquals(1, ledgerSyncResult[node1.fromNetwork().identity()]!!.missingAtRequester.size)
+
+        node2.fromNetwork().runTransactionRecoveryFlow(ledgerSyncResult)
+
+        val ledgerSyncResult2 = node2.fromNetwork().runRequestLedgerSyncFlow(node2.fromNetwork().regularNodes())
+        assertEquals(1, ledgerSyncResult2[node1.fromNetwork().identity()]!!.missingAtRequester.size)
+
+        val statesNode1 = node1.fromNetwork().bogusStates()
+        val statesNode2 = node2.fromNetwork().bogusStates()
+        assertEquals(1, statesNode1.states.size)
+        assertEquals(1, statesNode2.states.size)
+
+    }
+
     private fun StartedNode<MockNode>.runRequestLedgerSyncFlow(members: List<Party>): Map<Party, LedgerSyncFindings> {
         val future = services.startFlow(RequestLedgersSyncFlow(members)).resultFuture
         mockNetwork.runNetwork()
