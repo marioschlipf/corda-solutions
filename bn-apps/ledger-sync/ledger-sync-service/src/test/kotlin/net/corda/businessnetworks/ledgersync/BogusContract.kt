@@ -13,5 +13,7 @@ class BogusContract : Contract {
 
     sealed class Commands : TypeOnlyCommandData() {
         class Bogus : Commands()
+        class TransformBogus : Commands()
+        class ConsumeBogus : Commands()
     }
 }
