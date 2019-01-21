@@ -3,14 +3,15 @@ package net.corda.businessnetworks.ledgersync
 import co.paralleluniverse.fibers.Suspendable
 import net.corda.core.contracts.Command
 import net.corda.core.contracts.LinearState
+import net.corda.core.contracts.SchedulableState
+import net.corda.core.contracts.ScheduledActivity
+import net.corda.core.contracts.StateAndRef
+import net.corda.core.contracts.StateRef
 import net.corda.core.contracts.UniqueIdentifier
-import net.corda.core.flows.CollectSignaturesFlow
 import net.corda.core.flows.FinalityFlow
 import net.corda.core.flows.FlowLogic
-import net.corda.core.flows.FlowSession
-import net.corda.core.flows.InitiatedBy
+import net.corda.core.flows.FlowLogicRefFactory
 import net.corda.core.flows.InitiatingFlow
-import net.corda.core.flows.SignTransactionFlow
 import net.corda.core.flows.StartableByRPC
 import net.corda.core.identity.AbstractParty
 import net.corda.core.identity.Party
@@ -30,7 +31,7 @@ class BogusFlow(
     override fun call(): SignedTransaction {
         val notary = serviceHub.networkMapCache.notaryIdentities.first()
 
-        val cmd = Command(BogusContract.Commands.Bogus(), listOf(them.owningKey))
+        val cmd = Command(BogusContract.Commands.Bogus(), listOf(ourIdentity.owningKey))
 
         val txBuilder = TransactionBuilder(notary)
                 .addOutputState(BogusState(ourIdentity, them), BOGUS_CONTRACT_ID)
@@ -40,31 +41,43 @@ class BogusFlow(
 
         val partiallySigned = serviceHub.signInitialTransaction(txBuilder)
 
-        val session = initiateFlow(them)
-
-        val fullySigned = subFlow(CollectSignaturesFlow(partiallySigned, setOf(session)))
-
-        return subFlow(FinalityFlow(fullySigned))
+        return subFlow(FinalityFlow(partiallySigned))
     }
 }
 
-@InitiatedBy(BogusFlow::class)
-class BogusFlowFlowResponder(val flowSession: FlowSession) : FlowLogic<Unit>() {
-
+@InitiatingFlow
+@StartableByRPC
+class TransformBogusFlow(
+        private val bogusState: StateAndRef<BogusState>
+) : FlowLogic<SignedTransaction>() {
     @Suspendable
-    override fun call() {
-        subFlow(object : SignTransactionFlow(flowSession) {
-            override fun checkTransaction(stx: SignedTransaction) {
-                // accept everything. this is a simple test fixture only.
-            }
-        })
+    override fun call(): SignedTransaction {
+        val notary = serviceHub.networkMapCache.notaryIdentities.first()
+
+        val cmd = Command(BogusContract.Commands.Bogus(), listOf(ourIdentity.owningKey))
+
+        val txBuilder = TransactionBuilder(notary)
+                .addInputState(bogusState)
+                .addOutputState(bogusState.state.data.copy(counter = bogusState.state.data.counter + 1), BOGUS_CONTRACT_ID)
+                .addCommand(cmd).apply {
+                    verify(serviceHub)
+                }
+
+        val partiallySigned = serviceHub.signInitialTransaction(txBuilder)
+
+        return subFlow(FinalityFlow(partiallySigned))
     }
 }
 
 data class BogusState(
         private val us: Party,
         private val them: Party,
-        override val linearId: UniqueIdentifier = UniqueIdentifier()
-) : LinearState {
+        override val linearId: UniqueIdentifier = UniqueIdentifier(),
+        val counter: Int = 1
+) : LinearState, SchedulableState {
+    override fun nextScheduledActivity(thisStateRef: StateRef, flowLogicRefFactory: FlowLogicRefFactory): ScheduledActivity? {
+        return null
+    }
+
     override val participants: List<AbstractParty> = listOf(us, them)
 }

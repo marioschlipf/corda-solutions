@@ -4,6 +4,7 @@ import net.corda.core.identity.CordaX500Name
 import net.corda.core.identity.Party
 import net.corda.core.node.services.Vault.Page
 import net.corda.core.node.services.Vault.StateStatus.ALL
+import net.corda.core.node.services.Vault.StateStatus.UNCONSUMED
 import net.corda.core.node.services.vault.MAX_PAGE_SIZE
 import net.corda.core.node.services.vault.PageSpecification
 import net.corda.core.node.services.vault.QueryCriteria.VaultQueryCriteria
@@ -18,6 +19,7 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class LedgerConsistencyTests {
     private val notary = CordaX500Name("Notary", "London", "GB")
@@ -159,6 +161,43 @@ class LedgerConsistencyTests {
         assertEquals(6, node1.fromNetwork().bogusStateCount())
     }
 
+    @Test
+    fun `transaction chain can be recovered`() {
+        val future = node2.fromNetwork().services.startFlow(BogusFlow(node1.fromNetwork().identity())).resultFuture
+        mockNetwork.runNetwork()
+        future.getOrThrow()
+
+        val transformFuture = node1.fromNetwork().services.startFlow(TransformBogusFlow(
+                node1.fromNetwork().unconsumedBogusStates().states.single()
+        )).resultFuture
+        mockNetwork.runNetwork()
+        transformFuture.getOrThrow()
+
+        assertEquals(2, node1.fromNetwork().bogusStateCount())
+        assertEquals(2, node2.fromNetwork().bogusStateCount())
+
+        println(node1.fromNetwork().bogusStates())
+        println(node2.fromNetwork().bogusStates())
+
+        node2.fromNetwork().simulateCatastrophicFailure()
+        assertEquals(0, node2.fromNetwork().bogusStateCount())
+
+        // Txs are missing
+        val ledgerSyncResult = node2.fromNetwork().runRequestLedgerSyncFlow(node2.fromNetwork().regularNodes())
+        assertEquals(2, ledgerSyncResult[node1.fromNetwork().identity()]!!.missingAtRequester.size)
+
+        node2.fromNetwork().runTransactionRecoveryFlow(ledgerSyncResult)
+
+        val ledgerSyncResult2 = node2.fromNetwork().runRequestLedgerSyncFlow(node2.fromNetwork().regularNodes())
+        assertTrue(ledgerSyncResult2.values.all { it.missingAtRequestee.isEmpty() })
+        assertTrue(ledgerSyncResult2.values.all { it.missingAtRequester.isEmpty() })
+
+        val statesNode1 = node1.fromNetwork().bogusStates()
+        val statesNode2 = node2.fromNetwork().bogusStates()
+        assertEquals(statesNode1.states.size, statesNode2.states.size)
+        assertEquals(2, statesNode1.states.size)
+    }
+
     private fun StartedNode<MockNode>.runRequestLedgerSyncFlow(members: List<Party>): Map<Party, LedgerSyncFindings> {
         val future = services.startFlow(RequestLedgersSyncFlow(members)).resultFuture
         mockNetwork.runNetwork()
@@ -192,6 +231,14 @@ class LedgerConsistencyTests {
         services.vaultService.queryBy(
                 BogusState::class.java,
                 VaultQueryCriteria(ALL),
+                PageSpecification(1, MAX_PAGE_SIZE)
+        )
+    }
+
+    private fun StartedNode<MockNode>.unconsumedBogusStates(): Page<BogusState> = database.transaction {
+        services.vaultService.queryBy(
+                BogusState::class.java,
+                VaultQueryCriteria(UNCONSUMED),
                 PageSpecification(1, MAX_PAGE_SIZE)
         )
     }

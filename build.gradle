@@ -1,7 +1,9 @@
 buildscript {
     ext {
-        corda_release_group = 'net.corda'
-        corda_release_version = '3.3-corda'
+        corda_release_group = 'com.r3.corda'
+        corda_release_version = '3.2'
+//        corda_release_group = 'net.corda'
+//        corda_release_version = '3.3-corda'
         corda_gradle_plugins_version = '4.0.25'
         aetherVersion = '1.0.0.v20140518'
         mavenVersion = '3.1.0'
@@ -9,6 +11,7 @@ buildscript {
         kotlin_version = '1.2.71'
         junit_version = '4.12'
         dokka_version = '0.9.17'
+        local_repo = "${project.rootDir}/gradle/repository"
     }
 
     repositories {
@@ -48,16 +51,27 @@ allprojects {
 subprojects {
     buildscript {
         repositories {
+            maven { url "file://${local_repo}" }
+
             jcenter()
             mavenCentral()
         }
     }
 
     repositories {
+        maven { url "file://${local_repo}" }
+
         mavenLocal()
         jcenter()
         mavenCentral()
         maven { url 'https://jitpack.io' }
+    }
+}
+
+
+def assert_corda_enterprise_is_available() {
+    if (!new File("${local_repo}/com/r3/corda").exists()) {
+        throw new GradleException("Corda enterprise is not installed in local repository '${local_repo}'")
     }
 }
 
@@ -107,6 +121,7 @@ configure(publishProjects) { subproject ->
     }
 }
 
+assert_corda_enterprise_is_available()
 
 artifactory {
     publish {
