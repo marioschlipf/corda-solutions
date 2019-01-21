@@ -3,15 +3,15 @@ package net.corda.businessnetworks.ledgersync
 import co.paralleluniverse.fibers.Suspendable
 import net.corda.core.contracts.Command
 import net.corda.core.contracts.LinearState
+import net.corda.core.contracts.SchedulableState
+import net.corda.core.contracts.ScheduledActivity
 import net.corda.core.contracts.StateAndRef
+import net.corda.core.contracts.StateRef
 import net.corda.core.contracts.UniqueIdentifier
-import net.corda.core.flows.CollectSignaturesFlow
 import net.corda.core.flows.FinalityFlow
 import net.corda.core.flows.FlowLogic
-import net.corda.core.flows.FlowSession
-import net.corda.core.flows.InitiatedBy
+import net.corda.core.flows.FlowLogicRefFactory
 import net.corda.core.flows.InitiatingFlow
-import net.corda.core.flows.SignTransactionFlow
 import net.corda.core.flows.StartableByRPC
 import net.corda.core.identity.AbstractParty
 import net.corda.core.identity.Party
@@ -31,7 +31,7 @@ class BogusFlow(
     override fun call(): SignedTransaction {
         val notary = serviceHub.networkMapCache.notaryIdentities.first()
 
-        val cmd = Command(BogusContract.Commands.Bogus(), listOf(them.owningKey))
+        val cmd = Command(BogusContract.Commands.Bogus(), listOf(ourIdentity.owningKey))
 
         val txBuilder = TransactionBuilder(notary)
                 .addOutputState(BogusState(ourIdentity, them), BOGUS_CONTRACT_ID)
@@ -41,40 +41,39 @@ class BogusFlow(
 
         val partiallySigned = serviceHub.signInitialTransaction(txBuilder)
 
-        val session = initiateFlow(them)
+        val x = subFlow(FinalityFlow(partiallySigned))
 
-        val fullySigned = subFlow(CollectSignaturesFlow(partiallySigned, setOf(session)))
 
-        return subFlow(FinalityFlow(fullySigned))
-    }
-}
+        val cmd2 = Command(BogusContract.Commands.Bogus(), listOf(ourIdentity.owningKey))
 
-@InitiatedBy(BogusFlow::class)
-class BogusFlowFlowResponder(val flowSession: FlowSession) : FlowLogic<Unit>() {
+        val txBuilder2 = TransactionBuilder(notary)
+                .addOutputState(BogusCompanion(ourIdentity, them), BOGUS_CONTRACT_ID)
+                .addCommand(cmd2).apply {
+                    verify(serviceHub)
+                }
 
-    @Suspendable
-    override fun call() {
-        subFlow(object : SignTransactionFlow(flowSession) {
-            override fun checkTransaction(stx: SignedTransaction) {
-                // accept everything. this is a simple test fixture only.
-            }
-        })
+        val partiallySigned2 = serviceHub.signInitialTransaction(txBuilder2)
+
+        subFlow(FinalityFlow(partiallySigned2))
+
+        return x
     }
 }
 
 @InitiatingFlow
 @StartableByRPC
 class TransformBogusFlow(
-        private val them: Party,
-        private val bogusState: StateAndRef<BogusState>
+        private val bogusState: StateAndRef<BogusState>,
+        private val bogusCompanion: StateAndRef<BogusCompanion>
 ) : FlowLogic<SignedTransaction>() {
     @Suspendable
     override fun call(): SignedTransaction {
         val notary = serviceHub.networkMapCache.notaryIdentities.first()
 
-        val cmd = Command(BogusContract.Commands.TransformBogus(), listOf(them.owningKey))
+        val cmd = Command(BogusContract.Commands.Bogus(), listOf(ourIdentity.owningKey))
 
         val txBuilder = TransactionBuilder(notary)
+                .addInputState(bogusCompanion)
                 .addInputState(bogusState)
                 .addOutputState(bogusState.state.data.copy(counter = bogusState.state.data.counter + 1), BOGUS_CONTRACT_ID)
                 .addCommand(cmd).apply {
@@ -83,65 +82,7 @@ class TransformBogusFlow(
 
         val partiallySigned = serviceHub.signInitialTransaction(txBuilder)
 
-        val session = initiateFlow(them)
-
-        val fullySigned = subFlow(CollectSignaturesFlow(partiallySigned, setOf(session)))
-
-        return subFlow(FinalityFlow(fullySigned))
-    }
-}
-
-@InitiatingFlow
-@StartableByRPC
-class ConsumeBogusFlow(
-        private val them: Party,
-        private val bogusState: StateAndRef<BogusState>
-) : FlowLogic<SignedTransaction>() {
-    @Suspendable
-    override fun call(): SignedTransaction {
-        val notary = serviceHub.networkMapCache.notaryIdentities.first()
-
-        val cmd = Command(BogusContract.Commands.ConsumeBogus(), listOf(them.owningKey))
-
-        val txBuilder = TransactionBuilder(notary)
-                .addInputState(bogusState)
-                .addCommand(cmd).apply {
-                    verify(serviceHub)
-                }
-
-        val partiallySigned = serviceHub.signInitialTransaction(txBuilder)
-
-        val session = initiateFlow(them)
-
-        val fullySigned = subFlow(CollectSignaturesFlow(partiallySigned, setOf(session)))
-
-        return subFlow(FinalityFlow(fullySigned))
-    }
-}
-
-@InitiatedBy(TransformBogusFlow::class)
-class TransformBogusFlowFlowResponder(val flowSession: FlowSession) : FlowLogic<Unit>() {
-
-    @Suspendable
-    override fun call() {
-        subFlow(object : SignTransactionFlow(flowSession) {
-            override fun checkTransaction(stx: SignedTransaction) {
-                // accept everything. this is a simple test fixture only.
-            }
-        })
-    }
-}
-
-@InitiatedBy(ConsumeBogusFlow::class)
-class ConsumeBogusFlowFlowResponder(val flowSession: FlowSession) : FlowLogic<Unit>() {
-
-    @Suspendable
-    override fun call() {
-        subFlow(object : SignTransactionFlow(flowSession) {
-            override fun checkTransaction(stx: SignedTransaction) {
-                // accept everything. this is a simple test fixture only.
-            }
-        })
+        return subFlow(FinalityFlow(partiallySigned))
     }
 }
 
@@ -150,6 +91,19 @@ data class BogusState(
         private val them: Party,
         override val linearId: UniqueIdentifier = UniqueIdentifier(),
         val counter: Int = 1
-) : LinearState {
+) : LinearState, SchedulableState {
+    override fun nextScheduledActivity(thisStateRef: StateRef, flowLogicRefFactory: FlowLogicRefFactory): ScheduledActivity? {
+        return null
+    }
+
     override val participants: List<AbstractParty> = listOf(us, them)
+}
+
+data class BogusCompanion(
+        private val us: Party,
+        private val them: Party,
+        override val linearId: UniqueIdentifier = UniqueIdentifier(),
+        val counter: Int = 1
+) : LinearState {
+    override val participants: List<AbstractParty> = listOf(them, us)
 }

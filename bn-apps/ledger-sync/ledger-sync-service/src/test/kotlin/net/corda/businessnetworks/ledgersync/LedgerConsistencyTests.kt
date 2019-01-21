@@ -8,7 +8,6 @@ import net.corda.core.node.services.Vault.StateStatus.UNCONSUMED
 import net.corda.core.node.services.vault.MAX_PAGE_SIZE
 import net.corda.core.node.services.vault.PageSpecification
 import net.corda.core.node.services.vault.QueryCriteria.VaultQueryCriteria
-import net.corda.core.transactions.SignedTransaction
 import net.corda.core.utilities.getOrThrow
 import net.corda.node.internal.StartedNode
 import net.corda.testing.node.MockNetworkNotarySpec
@@ -164,39 +163,33 @@ class LedgerConsistencyTests {
 
     @Test
     fun `transaction chain can be recovered`() {
-        val future = node1.fromNetwork().services.startFlow(BogusFlow(node2.fromNetwork().identity())).resultFuture
+        val future = node2.fromNetwork().services.startFlow(BogusFlow(node1.fromNetwork().identity())).resultFuture
         mockNetwork.runNetwork()
         future.getOrThrow()
 
-        val txsToCreate = 10
-        for (i in 1..10) {
+        val bogusCompanion = node1.fromNetwork().bogusCompanionStates().states.single()
             val transformFuture = node1.fromNetwork().services.startFlow(TransformBogusFlow(
-                    node2.fromNetwork().identity(),
-                    node1.fromNetwork().unconsumedBogusStates().states.single()
+                    node1.fromNetwork().unconsumedBogusStates().states.single(),
+                    bogusCompanion
             )).resultFuture
             mockNetwork.runNetwork()
             transformFuture.getOrThrow()
-        }
 
-        val consumeFuture = node1.fromNetwork().services.startFlow(ConsumeBogusFlow(
-                node2.fromNetwork().identity(),
-                node1.fromNetwork().unconsumedBogusStates().states.single()
-        )).resultFuture
-        mockNetwork.runNetwork()
-        consumeFuture.getOrThrow()
-
-        assertEquals(txsToCreate + 1, node1.fromNetwork().bogusStateCount())
-        assertEquals(txsToCreate + 1, node2.fromNetwork().bogusStateCount())
+        assertEquals(1, node1.fromNetwork().bogusStateCount())
+        assertEquals(1, node2.fromNetwork().bogusStateCount())
 
         println(node1.fromNetwork().bogusStates())
         println(node2.fromNetwork().bogusStates())
+        println(node1.fromNetwork().bogusCompanionStates())
+        println(node2.fromNetwork().bogusCompanionStates())
 
         node2.fromNetwork().simulateCatastrophicFailure()
         assertEquals(0, node2.fromNetwork().bogusStateCount())
+        assertEquals(0, node2.fromNetwork().bogusCompanionStates().states.size)
 
         // Txs are missing
         val ledgerSyncResult = node2.fromNetwork().runRequestLedgerSyncFlow(node2.fromNetwork().regularNodes())
-        assertEquals(txsToCreate + 1, ledgerSyncResult[node1.fromNetwork().identity()]!!.missingAtRequester.size)
+        assertEquals(3, ledgerSyncResult[node1.fromNetwork().identity()]!!.missingAtRequester.size)
 
         node2.fromNetwork().runTransactionRecoveryFlow(ledgerSyncResult)
 
@@ -206,8 +199,11 @@ class LedgerConsistencyTests {
 
         val statesNode1 = node1.fromNetwork().bogusStates()
         val statesNode2 = node2.fromNetwork().bogusStates()
-        assertEquals(statesNode2.states.size, statesNode1.states.size)
-        assertEquals(txsToCreate + 1, statesNode1.states.size)
+        val companionStatesNode1 = node1.fromNetwork().bogusCompanionStates()
+        val companionStatesNode2 = node2.fromNetwork().bogusCompanionStates()
+        assertEquals(statesNode1.states.size, statesNode2.states.size)
+        assertEquals(companionStatesNode1.states.size, companionStatesNode2.states.size)
+        assertEquals(2, statesNode1.states.size)
     }
 
     private fun StartedNode<MockNode>.runRequestLedgerSyncFlow(members: List<Party>): Map<Party, LedgerSyncFindings> {
@@ -247,6 +243,14 @@ class LedgerConsistencyTests {
         )
     }
 
+    private fun StartedNode<MockNode>.bogusCompanionStates(): Page<BogusCompanion> = database.transaction {
+        services.vaultService.queryBy(
+                BogusCompanion::class.java,
+                VaultQueryCriteria(ALL),
+                PageSpecification(1, MAX_PAGE_SIZE)
+        )
+    }
+
     private fun StartedNode<MockNode>.unconsumedBogusStates(): Page<BogusState> = database.transaction {
         services.vaultService.queryBy(
                 BogusState::class.java,
@@ -258,6 +262,17 @@ class LedgerConsistencyTests {
     private fun StartedNode<MockNode>.simulateCatastrophicFailure() {
         services.database.transaction {
             connection.prepareStatement("""SELECT transaction_id FROM VAULT_STATES WHERE CONTRACT_STATE_CLASS_NAME='${BogusState::class.java.canonicalName}'""").executeQuery().let { results ->
+                while (results.next()) {
+                    results.getString(1).let { transactionId ->
+                        connection.prepareStatement("""DELETE FROM NODE_TRANSACTIONS WHERE tx_id='$transactionId'""").execute()
+                        connection.prepareStatement("""DELETE FROM VAULT_LINEAR_STATES_PARTS WHERE transaction_id='$transactionId'""").execute()
+                        connection.prepareStatement("""DELETE FROM VAULT_LINEAR_STATES WHERE transaction_id='$transactionId'""").execute()
+                        connection.prepareStatement("""DELETE FROM VAULT_STATES WHERE transaction_id='$transactionId'""").execute()
+                    }
+                }
+            }
+
+            connection.prepareStatement("""SELECT transaction_id FROM VAULT_STATES WHERE CONTRACT_STATE_CLASS_NAME='${BogusCompanion::class.java.canonicalName}'""").executeQuery().let { results ->
                 while (results.next()) {
                     results.getString(1).let { transactionId ->
                         connection.prepareStatement("""DELETE FROM NODE_TRANSACTIONS WHERE tx_id='$transactionId'""").execute()
